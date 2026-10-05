@@ -38,12 +38,16 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FolderShared
+import androidx.compose.material.icons.filled.Grain
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material.icons.filled.Waves
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -386,6 +390,32 @@ fun HomeScreen(
                 modifier = Modifier.weight(1f),
                 onClick = {
                     viewModel.setTool(EditTool.BLACKOUT)
+                    onNavigateToEdit()
+                }
+            )
+            QuickToolCard(
+                title = "Scramble",
+                icon = Icons.Default.Grain,
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    viewModel.setTool(EditTool.SCRAMBLE)
+                    onNavigateToEdit()
+                }
+            )
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            QuickToolCard(
+                title = "Grading",
+                icon = Icons.Default.Tune,
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    viewModel.setTool(EditTool.ADJUST)
                     onNavigateToEdit()
                 }
             )

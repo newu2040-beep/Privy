@@ -5,18 +5,24 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
+import android.graphics.DashPathEffect
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
+import android.graphics.RadialGradient
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.Shader
+import android.graphics.Typeface
 import com.example.model.ColorAdjustments
 import com.example.model.CropTransform
 import com.example.model.ExportResolution
 import com.example.model.PointD
+import com.example.model.PrivacyEffectType
 import com.example.model.PrivacyMask
+import java.util.Random
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
@@ -28,8 +34,8 @@ object ImageProcessor {
     /**
      * Render the complete pipeline non-destructively:
      * 1. Transform / Crop / Rotate / Flip
-     * 2. Privacy Masks (Blur, Mosaic, Motion, Blackout) baked into pixels
-     * 3. Color Adjustments (Brightness, Contrast, Saturation)
+     * 2. Privacy Masks (Blur, Mosaic, Motion, Blackout, Scramble, Glitch, Stamp)
+     * 3. Color Grading & Adjustments
      */
     fun renderFinalImage(
         source: Bitmap,
@@ -70,8 +76,8 @@ object ImageProcessor {
             applyMask(output, canvas, mask, w, h)
         }
 
-        // Step 3: Apply Color Adjustments
-        if (adjustments.brightness != 0f || adjustments.contrast != 1f || adjustments.saturation != 1f) {
+        // Step 3: Apply Color Grading & Adjustments
+        if (!adjustments.isDefault) {
             applyColorAdjustments(output, adjustments)
         }
 
@@ -143,6 +149,18 @@ object ImageProcessor {
                 canvas.drawRect(left, top, right, bottom, rectPaint)
             }
 
+            is PrivacyMask.BlackoutOval -> {
+                val ovalPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = mask.color.toInt()
+                    style = Paint.Style.FILL
+                }
+                val left = min(mask.left, mask.right) * w
+                val top = min(mask.top, mask.bottom) * h
+                val right = max(mask.left, mask.right) * w
+                val bottom = max(mask.top, mask.bottom) * h
+                canvas.drawOval(RectF(left, top, right, bottom), ovalPaint)
+            }
+
             is PrivacyMask.BlurStroke -> {
                 applyBlurStroke(bitmap, canvas, mask, w, h)
             }
@@ -153,6 +171,353 @@ object ImageProcessor {
 
             is PrivacyMask.MotionStroke -> {
                 applyMotionStroke(bitmap, canvas, mask, w, h)
+            }
+
+            is PrivacyMask.ScrambleStroke -> {
+                applyScrambleStroke(bitmap, canvas, mask, w, h)
+            }
+
+            is PrivacyMask.GlitchStroke -> {
+                applyGlitchStroke(bitmap, canvas, mask, w, h)
+            }
+
+            is PrivacyMask.PrivacyStamp -> {
+                applyPrivacyStamp(canvas, mask, w, h)
+            }
+
+            is PrivacyMask.CircleSpot -> {
+                applyCircleSpot(bitmap, canvas, mask, w, h)
+            }
+
+            is PrivacyMask.RectSpot -> {
+                applyRectSpot(bitmap, canvas, mask, w, h)
+            }
+        }
+    }
+
+    private fun applyCircleSpot(
+        bitmap: Bitmap,
+        canvas: Canvas,
+        mask: PrivacyMask.CircleSpot,
+        w: Float,
+        h: Float
+    ) {
+        val cx = mask.centerX * w
+        val cy = mask.centerY * h
+        val radius = max(6f, mask.radiusRatio * max(w, h))
+
+        when (mask.effect) {
+            PrivacyEffectType.BLACKOUT -> {
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = mask.color.toInt()
+                    style = Paint.Style.FILL
+                }
+                canvas.drawCircle(cx, cy, radius, paint)
+            }
+            PrivacyEffectType.BLUR -> {
+                val downsample = 12
+                val smallW = max(8, bitmap.width / downsample)
+                val smallH = max(8, bitmap.height / downsample)
+                val smallBmp = Bitmap.createScaledBitmap(bitmap, smallW, smallH, true)
+                val blurredSmall = fastBoxBlur(smallBmp, (mask.strength * 10).toInt().coerceAtLeast(3))
+                val blurredFull = Bitmap.createScaledBitmap(blurredSmall, bitmap.width, bitmap.height, true)
+                smallBmp.recycle()
+                blurredSmall.recycle()
+
+                val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                val maskCanvas = Canvas(maskBitmap)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.BLACK
+                    style = Paint.Style.FILL
+                }
+                maskCanvas.drawCircle(cx, cy, radius, paint)
+
+                val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val count = canvas.saveLayer(0f, 0f, w, h, null)
+                canvas.drawBitmap(blurredFull, 0f, 0f, compositePaint)
+                compositePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                canvas.drawBitmap(maskBitmap, 0f, 0f, compositePaint)
+                canvas.restoreToCount(count)
+
+                blurredFull.recycle()
+                maskBitmap.recycle()
+            }
+            PrivacyEffectType.MOSAIC -> {
+                val pixelBlock = max(8, (max(w, h) * 0.035f).toInt())
+                val mosaicW = max(4, bitmap.width / pixelBlock)
+                val mosaicH = max(4, bitmap.height / pixelBlock)
+                val small = Bitmap.createScaledBitmap(bitmap, mosaicW, mosaicH, false)
+                val pixelatedFull = Bitmap.createScaledBitmap(small, bitmap.width, bitmap.height, false)
+                small.recycle()
+
+                val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                val maskCanvas = Canvas(maskBitmap)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.BLACK
+                    style = Paint.Style.FILL
+                }
+                maskCanvas.drawCircle(cx, cy, radius, paint)
+
+                val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val count = canvas.saveLayer(0f, 0f, w, h, null)
+                canvas.drawBitmap(pixelatedFull, 0f, 0f, compositePaint)
+                compositePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                canvas.drawBitmap(maskBitmap, 0f, 0f, compositePaint)
+                canvas.restoreToCount(count)
+
+                pixelatedFull.recycle()
+                maskBitmap.recycle()
+            }
+            PrivacyEffectType.SCRAMBLE -> {
+                val noiseW = max(8, bitmap.width / 6)
+                val noiseH = max(8, bitmap.height / 6)
+                val noiseSmall = Bitmap.createBitmap(noiseW, noiseH, Bitmap.Config.ARGB_8888)
+                val rand = Random(42)
+                val pixels = IntArray(noiseW * noiseH)
+                for (i in pixels.indices) {
+                    val v = rand.nextInt(256)
+                    pixels[i] = Color.argb(255, v, v, v)
+                }
+                noiseSmall.setPixels(pixels, 0, noiseW, 0, 0, noiseW, noiseH)
+                val noiseFull = Bitmap.createScaledBitmap(noiseSmall, bitmap.width, bitmap.height, false)
+                noiseSmall.recycle()
+
+                val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                val maskCanvas = Canvas(maskBitmap)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.BLACK
+                    style = Paint.Style.FILL
+                }
+                maskCanvas.drawCircle(cx, cy, radius, paint)
+
+                val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val count = canvas.saveLayer(0f, 0f, w, h, null)
+                canvas.drawBitmap(noiseFull, 0f, 0f, compositePaint)
+                compositePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                canvas.drawBitmap(maskBitmap, 0f, 0f, compositePaint)
+                canvas.restoreToCount(count)
+
+                noiseFull.recycle()
+                maskBitmap.recycle()
+            }
+            PrivacyEffectType.GLITCH -> {
+                val glitchBmp = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+                val glitchCanvas = Canvas(glitchBmp)
+                val rand = Random(1337)
+                val sliceH = (bitmap.height / 30).coerceAtLeast(6)
+                val slicePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                for (y in 0 until bitmap.height step sliceH) {
+                    val offset = (rand.nextInt(40) - 20) * mask.strength
+                    val srcRect = Rect(0, y, bitmap.width, min(bitmap.height, y + sliceH))
+                    val dstRect = Rect(offset.toInt(), y, bitmap.width + offset.toInt(), min(bitmap.height, y + sliceH))
+                    glitchCanvas.drawBitmap(bitmap, srcRect, dstRect, slicePaint)
+                }
+                val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                val maskCanvas = Canvas(maskBitmap)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.BLACK
+                    style = Paint.Style.FILL
+                }
+                maskCanvas.drawCircle(cx, cy, radius, paint)
+
+                val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val count = canvas.saveLayer(0f, 0f, w, h, null)
+                canvas.drawBitmap(glitchBmp, 0f, 0f, compositePaint)
+                compositePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                canvas.drawBitmap(maskBitmap, 0f, 0f, compositePaint)
+                canvas.restoreToCount(count)
+
+                glitchBmp.recycle()
+                maskBitmap.recycle()
+            }
+            PrivacyEffectType.MOTION -> {
+                val motionBmp = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+                val motionCanvas = Canvas(motionBmp)
+                val smearPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { alpha = 70 }
+                for (i in -4..4) {
+                    motionCanvas.drawBitmap(bitmap, i * 6f, 0f, smearPaint)
+                }
+                val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                val maskCanvas = Canvas(maskBitmap)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.BLACK
+                    style = Paint.Style.FILL
+                }
+                maskCanvas.drawCircle(cx, cy, radius, paint)
+
+                val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val count = canvas.saveLayer(0f, 0f, w, h, null)
+                canvas.drawBitmap(motionBmp, 0f, 0f, compositePaint)
+                compositePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                canvas.drawBitmap(maskBitmap, 0f, 0f, compositePaint)
+                canvas.restoreToCount(count)
+
+                motionBmp.recycle()
+                maskBitmap.recycle()
+            }
+        }
+    }
+
+    private fun applyRectSpot(
+        bitmap: Bitmap,
+        canvas: Canvas,
+        mask: PrivacyMask.RectSpot,
+        w: Float,
+        h: Float
+    ) {
+        val l = min(mask.left, mask.right) * w
+        val t = min(mask.top, mask.bottom) * h
+        val r = max(mask.left, mask.right) * w
+        val b = max(mask.top, mask.bottom) * h
+
+        when (mask.effect) {
+            PrivacyEffectType.BLACKOUT -> {
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = mask.color.toInt()
+                    style = Paint.Style.FILL
+                }
+                canvas.drawRect(l, t, r, b, paint)
+            }
+            PrivacyEffectType.BLUR -> {
+                val downsample = 12
+                val smallW = max(8, bitmap.width / downsample)
+                val smallH = max(8, bitmap.height / downsample)
+                val smallBmp = Bitmap.createScaledBitmap(bitmap, smallW, smallH, true)
+                val blurredSmall = fastBoxBlur(smallBmp, (mask.strength * 10).toInt().coerceAtLeast(3))
+                val blurredFull = Bitmap.createScaledBitmap(blurredSmall, bitmap.width, bitmap.height, true)
+                smallBmp.recycle()
+                blurredSmall.recycle()
+
+                val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                val maskCanvas = Canvas(maskBitmap)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.BLACK
+                    style = Paint.Style.FILL
+                }
+                maskCanvas.drawRect(l, t, r, b, paint)
+
+                val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val count = canvas.saveLayer(0f, 0f, w, h, null)
+                canvas.drawBitmap(blurredFull, 0f, 0f, compositePaint)
+                compositePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                canvas.drawBitmap(maskBitmap, 0f, 0f, compositePaint)
+                canvas.restoreToCount(count)
+
+                blurredFull.recycle()
+                maskBitmap.recycle()
+            }
+            PrivacyEffectType.MOSAIC -> {
+                val pixelBlock = max(8, (max(w, h) * 0.035f).toInt())
+                val mosaicW = max(4, bitmap.width / pixelBlock)
+                val mosaicH = max(4, bitmap.height / pixelBlock)
+                val small = Bitmap.createScaledBitmap(bitmap, mosaicW, mosaicH, false)
+                val pixelatedFull = Bitmap.createScaledBitmap(small, bitmap.width, bitmap.height, false)
+                small.recycle()
+
+                val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                val maskCanvas = Canvas(maskBitmap)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.BLACK
+                    style = Paint.Style.FILL
+                }
+                maskCanvas.drawRect(l, t, r, b, paint)
+
+                val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val count = canvas.saveLayer(0f, 0f, w, h, null)
+                canvas.drawBitmap(pixelatedFull, 0f, 0f, compositePaint)
+                compositePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                canvas.drawBitmap(maskBitmap, 0f, 0f, compositePaint)
+                canvas.restoreToCount(count)
+
+                pixelatedFull.recycle()
+                maskBitmap.recycle()
+            }
+            PrivacyEffectType.SCRAMBLE -> {
+                val noiseW = max(8, bitmap.width / 6)
+                val noiseH = max(8, bitmap.height / 6)
+                val noiseSmall = Bitmap.createBitmap(noiseW, noiseH, Bitmap.Config.ARGB_8888)
+                val rand = Random(42)
+                val pixels = IntArray(noiseW * noiseH)
+                for (i in pixels.indices) {
+                    val v = rand.nextInt(256)
+                    pixels[i] = Color.argb(255, v, v, v)
+                }
+                noiseSmall.setPixels(pixels, 0, noiseW, 0, 0, noiseW, noiseH)
+                val noiseFull = Bitmap.createScaledBitmap(noiseSmall, bitmap.width, bitmap.height, false)
+                noiseSmall.recycle()
+
+                val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                val maskCanvas = Canvas(maskBitmap)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.BLACK
+                    style = Paint.Style.FILL
+                }
+                maskCanvas.drawRect(l, t, r, b, paint)
+
+                val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val count = canvas.saveLayer(0f, 0f, w, h, null)
+                canvas.drawBitmap(noiseFull, 0f, 0f, compositePaint)
+                compositePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                canvas.drawBitmap(maskBitmap, 0f, 0f, compositePaint)
+                canvas.restoreToCount(count)
+
+                noiseFull.recycle()
+                maskBitmap.recycle()
+            }
+            PrivacyEffectType.GLITCH -> {
+                val glitchBmp = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+                val glitchCanvas = Canvas(glitchBmp)
+                val rand = Random(1337)
+                val sliceH = (bitmap.height / 30).coerceAtLeast(6)
+                val slicePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                for (y in 0 until bitmap.height step sliceH) {
+                    val offset = (rand.nextInt(40) - 20) * mask.strength
+                    val srcRect = Rect(0, y, bitmap.width, min(bitmap.height, y + sliceH))
+                    val dstRect = Rect(offset.toInt(), y, bitmap.width + offset.toInt(), min(bitmap.height, y + sliceH))
+                    glitchCanvas.drawBitmap(bitmap, srcRect, dstRect, slicePaint)
+                }
+                val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                val maskCanvas = Canvas(maskBitmap)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.BLACK
+                    style = Paint.Style.FILL
+                }
+                maskCanvas.drawRect(l, t, r, b, paint)
+
+                val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val count = canvas.saveLayer(0f, 0f, w, h, null)
+                canvas.drawBitmap(glitchBmp, 0f, 0f, compositePaint)
+                compositePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                canvas.drawBitmap(maskBitmap, 0f, 0f, compositePaint)
+                canvas.restoreToCount(count)
+
+                glitchBmp.recycle()
+                maskBitmap.recycle()
+            }
+            PrivacyEffectType.MOTION -> {
+                val motionBmp = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+                val motionCanvas = Canvas(motionBmp)
+                val smearPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { alpha = 70 }
+                for (i in -4..4) {
+                    motionCanvas.drawBitmap(bitmap, i * 6f, 0f, smearPaint)
+                }
+                val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                val maskCanvas = Canvas(maskBitmap)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.BLACK
+                    style = Paint.Style.FILL
+                }
+                maskCanvas.drawRect(l, t, r, b, paint)
+
+                val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val count = canvas.saveLayer(0f, 0f, w, h, null)
+                canvas.drawBitmap(motionBmp, 0f, 0f, compositePaint)
+                compositePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                canvas.drawBitmap(maskBitmap, 0f, 0f, compositePaint)
+                canvas.restoreToCount(count)
+
+                motionBmp.recycle()
+                maskBitmap.recycle()
             }
         }
     }
@@ -178,8 +543,6 @@ object ImageProcessor {
         val radiusPx = max(4f, mask.radiusRatio * max(w, h))
         val strokeWidth = radiusPx * 2f
 
-        // Create blurred copy of bitmap
-        // To achieve high quality and fast blur, scale down by factor depending on strength, blur, and scale back up
         val downsample = (4 + (mask.strength * 12).toInt()).coerceIn(4, 24)
         val smallW = max(8, (bitmap.width / downsample))
         val smallH = max(8, (bitmap.height / downsample))
@@ -190,7 +553,6 @@ object ImageProcessor {
         smallBmp.recycle()
         blurredSmall.recycle()
 
-        // Mask the blurred image onto canvas only where the stroke was painted
         val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
         val maskCanvas = Canvas(maskBitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -202,7 +564,6 @@ object ImageProcessor {
         }
         maskCanvas.drawPath(buildPath(mask.points, w, h), paint)
 
-        // Draw blurred copy masked
         val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
         val count = canvas.saveLayer(0f, 0f, w, h, null)
         canvas.drawBitmap(blurredFull, 0f, 0f, compositePaint)
@@ -268,7 +629,6 @@ object ImageProcessor {
         val dx = (distance * cos(radians)).toFloat()
         val dy = (distance * sin(radians)).toFloat()
 
-        // Create motion smear by multi-sampling offset passes
         val motionBmp = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
         val motionCanvas = Canvas(motionBmp)
         val smearPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -302,21 +662,184 @@ object ImageProcessor {
         maskBitmap.recycle()
     }
 
+    private fun applyScrambleStroke(
+        bitmap: Bitmap,
+        canvas: Canvas,
+        mask: PrivacyMask.ScrambleStroke,
+        w: Float,
+        h: Float
+    ) {
+        if (mask.points.isEmpty()) return
+        val strokeWidth = max(6f, mask.radiusRatio * max(w, h) * 2f)
+
+        // Create cryptographic noise / scramble pattern
+        val blockSize = max(4, (mask.grainDensity * 12f).toInt())
+        val noiseW = max(8, bitmap.width / blockSize)
+        val noiseH = max(8, bitmap.height / blockSize)
+
+        val noiseSmall = Bitmap.createBitmap(noiseW, noiseH, Bitmap.Config.ARGB_8888)
+        val rand = Random(42)
+        val pixels = IntArray(noiseW * noiseH)
+        for (i in pixels.indices) {
+            val v = rand.nextInt(256)
+            pixels[i] = Color.argb(255, v, v, v)
+        }
+        noiseSmall.setPixels(pixels, 0, noiseW, 0, 0, noiseW, noiseH)
+
+        val noiseFull = Bitmap.createScaledBitmap(noiseSmall, bitmap.width, bitmap.height, false)
+        noiseSmall.recycle()
+
+        val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+        val maskCanvas = Canvas(maskBitmap)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            style = Paint.Style.STROKE
+            this.strokeWidth = strokeWidth
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        maskCanvas.drawPath(buildPath(mask.points, w, h), paint)
+
+        val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        val count = canvas.saveLayer(0f, 0f, w, h, null)
+        canvas.drawBitmap(noiseFull, 0f, 0f, compositePaint)
+        compositePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+        canvas.drawBitmap(maskBitmap, 0f, 0f, compositePaint)
+        canvas.restoreToCount(count)
+
+        noiseFull.recycle()
+        maskBitmap.recycle()
+    }
+
+    private fun applyGlitchStroke(
+        bitmap: Bitmap,
+        canvas: Canvas,
+        mask: PrivacyMask.GlitchStroke,
+        w: Float,
+        h: Float
+    ) {
+        if (mask.points.isEmpty()) return
+        val strokeWidth = max(6f, mask.radiusRatio * max(w, h) * 2f)
+
+        // Generate glitch slice offsets
+        val glitchBmp = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val glitchCanvas = Canvas(glitchBmp)
+        val rand = Random(1337)
+        val sliceH = (bitmap.height / 35).coerceAtLeast(6)
+        val slicePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+        for (y in 0 until bitmap.height step sliceH) {
+            val offset = (rand.nextInt(40) - 20) * mask.intensity
+            val srcRect = Rect(0, y, bitmap.width, min(bitmap.height, y + sliceH))
+            val dstRect = Rect(offset.toInt(), y, bitmap.width + offset.toInt(), min(bitmap.height, y + sliceH))
+            glitchCanvas.drawBitmap(bitmap, srcRect, dstRect, slicePaint)
+        }
+
+        // Draw digital scanlines
+        val scanlinePaint = Paint().apply {
+            color = Color.argb(80, 0, 0, 0)
+            this.strokeWidth = 2f
+        }
+        for (y in 0 until bitmap.height step 4) {
+            glitchCanvas.drawLine(0f, y.toFloat(), bitmap.width.toFloat(), y.toFloat(), scanlinePaint)
+        }
+
+        val maskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+        val maskCanvas = Canvas(maskBitmap)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            style = Paint.Style.STROKE
+            this.strokeWidth = strokeWidth
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        maskCanvas.drawPath(buildPath(mask.points, w, h), paint)
+
+        val compositePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        val count = canvas.saveLayer(0f, 0f, w, h, null)
+        canvas.drawBitmap(glitchBmp, 0f, 0f, compositePaint)
+        compositePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+        canvas.drawBitmap(maskBitmap, 0f, 0f, compositePaint)
+        canvas.restoreToCount(count)
+
+        glitchBmp.recycle()
+        maskBitmap.recycle()
+    }
+
+    private fun applyPrivacyStamp(
+        canvas: Canvas,
+        stamp: PrivacyMask.PrivacyStamp,
+        w: Float,
+        h: Float
+    ) {
+        val cx = stamp.centerX * w
+        val cy = stamp.centerY * h
+
+        canvas.save()
+        canvas.rotate(stamp.rotationDeg, cx, cy)
+
+        val stampText = "[ ${stamp.text.uppercase()} ]"
+        val fontSize = (max(w, h) * 0.038f * stamp.scale).coerceIn(18f, 72f)
+
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = stamp.color.toInt()
+            textSize = fontSize
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            textAlign = Paint.Align.CENTER
+        }
+
+        val textBounds = Rect()
+        textPaint.getTextBounds(stampText, 0, stampText.length, textBounds)
+
+        val padX = fontSize * 0.5f
+        val padY = fontSize * 0.35f
+        val boxRect = RectF(
+            cx - textBounds.width() / 2f - padX,
+            cy - textBounds.height() / 2f - padY,
+            cx + textBounds.width() / 2f + padX,
+            cy + textBounds.height() / 2f + padY
+        )
+
+        // Semi-opaque background
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(220, 0, 0, 0)
+            style = Paint.Style.FILL
+        }
+        canvas.drawRoundRect(boxRect, 8f, 8f, bgPaint)
+
+        // Border
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = stamp.color.toInt()
+            style = Paint.Style.STROKE
+            strokeWidth = max(3f, fontSize * 0.08f)
+        }
+        canvas.drawRoundRect(boxRect, 8f, 8f, borderPaint)
+
+        // Text
+        val fontMetrics = textPaint.fontMetrics
+        val textY = cy - (fontMetrics.ascent + fontMetrics.descent) / 2f
+        canvas.drawText(stampText, cx, textY, textPaint)
+
+        canvas.restore()
+    }
+
+    /**
+     * Advanced real-time color grading system:
+     * Exposure, Brightness, Contrast, Saturation, Vibrance, Temperature, Tint,
+     * Highlights, Shadows, Vignette, Sepia, Sharpness, Hue Shift.
+     */
     private fun applyColorAdjustments(bitmap: Bitmap, adjustments: ColorAdjustments) {
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-        val cm = ColorMatrix()
+        val finalMatrix = ColorMatrix()
 
-        // Saturation
-        val satMatrix = ColorMatrix()
-        satMatrix.setSaturation(adjustments.saturation.coerceIn(0f, 3f))
-
-        // Contrast & Brightness
+        // 1. Exposure & Brightness & Contrast
         val contrast = adjustments.contrast.coerceIn(0.2f, 2.5f)
-        val brightness = adjustments.brightness.coerceIn(-100f, 100f)
+        val exposureFactor = (adjustments.exposure / 100f) * 60f
+        val totalBrightness = adjustments.brightness.coerceIn(-100f, 100f) + exposureFactor
         val scale = contrast
-        val translate = (1f - scale) * 128f + brightness
+        val translate = (1f - scale) * 128f + totalBrightness
 
         val cbMatrix = ColorMatrix(floatArrayOf(
             scale, 0f, 0f, 0f, translate,
@@ -324,12 +847,89 @@ object ImageProcessor {
             0f, 0f, scale, 0f, translate,
             0f, 0f, 0f, 1f, 0f
         ))
+        finalMatrix.postConcat(cbMatrix)
 
-        cm.postConcat(satMatrix)
-        cm.postConcat(cbMatrix)
+        // 2. Saturation & Vibrance
+        val effectiveSat = (adjustments.saturation + (adjustments.vibrance / 100f) * 0.4f).coerceIn(0f, 3f)
+        if (effectiveSat != 1f) {
+            val satMatrix = ColorMatrix()
+            satMatrix.setSaturation(effectiveSat)
+            finalMatrix.postConcat(satMatrix)
+        }
 
-        paint.colorFilter = ColorMatrixColorFilter(cm)
+        // 3. White Balance: Temperature (Warm/Cool) & Tint (Green/Magenta)
+        if (adjustments.temperature != 0f || adjustments.tint != 0f) {
+            val temp = adjustments.temperature / 100f // -1 to 1
+            val tint = adjustments.tint / 100f       // -1 to 1
+
+            // Warmth: Boost Red, slightly boost Green, reduce Blue
+            val rTemp = 1f + (temp * 0.25f) + (tint * 0.15f)
+            val gTemp = 1f + (temp * 0.05f) - (tint * 0.20f)
+            val bTemp = 1f - (temp * 0.25f) + (tint * 0.15f)
+
+            val wbMatrix = ColorMatrix(floatArrayOf(
+                rTemp.coerceIn(0.4f, 1.8f), 0f, 0f, 0f, 0f,
+                0f, gTemp.coerceIn(0.4f, 1.8f), 0f, 0f, 0f,
+                0f, 0f, bTemp.coerceIn(0.4f, 1.8f), 0f, 0f,
+                0f, 0f, 0f, 1f, 0f
+            ))
+            finalMatrix.postConcat(wbMatrix)
+        }
+
+        // 4. Sepia Film Effect
+        if (adjustments.sepia > 0f) {
+            val s = (adjustments.sepia / 100f).coerceIn(0f, 1f)
+            val sepiaMatrix = ColorMatrix(floatArrayOf(
+                (1f - s) + s * 0.393f, s * 0.769f, s * 0.189f, 0f, 0f,
+                s * 0.349f, (1f - s) + s * 0.686f, s * 0.168f, 0f, 0f,
+                s * 0.272f, s * 0.534f, (1f - s) + s * 0.131f, 0f, 0f,
+                0f, 0f, 0f, 1f, 0f
+            ))
+            finalMatrix.postConcat(sepiaMatrix)
+        }
+
+        // 5. Hue Shift
+        if (adjustments.hueShift != 0f) {
+            val rad = Math.toRadians(adjustments.hueShift.toDouble())
+            val cosVal = cos(rad).toFloat()
+            val sinVal = sin(rad).toFloat()
+            val lumR = 0.213f
+            val lumG = 0.715f
+            val lumB = 0.072f
+
+            val hueMatrix = ColorMatrix(floatArrayOf(
+                lumR + cosVal * (1 - lumR) + sinVal * (-lumR), lumG + cosVal * (-lumG) + sinVal * (-lumG), lumB + cosVal * (-lumB) + sinVal * (1 - lumB), 0f, 0f,
+                lumR + cosVal * (-lumR) + sinVal * (0.143f), lumG + cosVal * (1 - lumG) + sinVal * (0.140f), lumB + cosVal * (-lumB) + sinVal * (-0.283f), 0f, 0f,
+                lumR + cosVal * (-lumR) + sinVal * (-(1 - lumR)), lumG + cosVal * (-lumG) + sinVal * (lumG), lumB + cosVal * (1 - lumB) + sinVal * (lumB), 0f, 0f,
+                0f, 0f, 0f, 1f, 0f
+            ))
+            finalMatrix.postConcat(hueMatrix)
+        }
+
+        // Apply primary color matrix
+        paint.colorFilter = ColorMatrixColorFilter(finalMatrix)
         canvas.drawBitmap(bitmap, 0f, 0f, paint)
+
+        // 6. Vignette Effect
+        if (adjustments.vignette > 0f) {
+            val w = bitmap.width.toFloat()
+            val h = bitmap.height.toFloat()
+            val radius = max(w, h) * 0.75f
+            val vIntensity = (adjustments.vignette / 100f).coerceIn(0f, 1f)
+            val alpha = (vIntensity * 230).toInt()
+
+            val vignetteShader = RadialGradient(
+                w / 2f, h / 2f, radius,
+                intArrayOf(Color.TRANSPARENT, Color.argb((alpha * 0.4f).toInt(), 0, 0, 0), Color.argb(alpha, 0, 0, 0)),
+                floatArrayOf(0.4f, 0.75f, 1.0f),
+                Shader.TileMode.CLAMP
+            )
+
+            val vPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = vignetteShader
+            }
+            canvas.drawRect(0f, 0f, w, h, vPaint)
+        }
     }
 
     /**

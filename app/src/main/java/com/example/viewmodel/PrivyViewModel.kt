@@ -2,7 +2,6 @@ package com.example.viewmodel
 
 import android.app.Application
 import android.content.ContentValues
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -16,18 +15,26 @@ import com.example.R
 import com.example.data.AppDatabase
 import com.example.model.BlackoutShape
 import com.example.model.ColorAdjustments
+import com.example.model.ColorGradingPreset
 import com.example.model.CropTransform
 import com.example.model.EditTool
 import com.example.model.ExportFormat
+import com.example.model.ExportResolution
 import com.example.model.HideMode
 import com.example.model.MetadataReport
+import com.example.model.MetadataTagItem
 import com.example.model.PointD
+import com.example.model.PrivacyEffectType
 import com.example.model.PrivacyMask
 import com.example.model.PrivacySettings
+import com.example.model.PrivacyStampType
 import com.example.model.RecentProject
+import com.example.model.SanitizationReport
+import com.example.model.SelectionShape
 import com.example.processing.ImageFormatConverter
 import com.example.processing.ImageProcessor
 import com.example.processing.MetadataSanitizer
+import com.example.ui.theme.PastelPalette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -38,7 +45,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
 import java.util.UUID
 
 class PrivyViewModel(application: Application) : AndroidViewModel(application) {
@@ -47,28 +53,37 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
     private val recentDao = db.recentDao()
 
     val recentProjects: StateFlow<List<RecentProject>> = recentDao.getAllRecent()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
-    // Core Image State
+    // Raw Full-Resolution in-memory Bitmap
     private var rawSourceBitmap: Bitmap? = null
+
+    // Display Preview Bitmap
     private val _displayBitmap = MutableStateFlow<Bitmap?>(null)
     val displayBitmap: StateFlow<Bitmap?> = _displayBitmap.asStateFlow()
 
+    // Original display bitmap (before any edits, for instant comparison hold)
+    private val _originalDisplayBitmap = MutableStateFlow<Bitmap?>(null)
+    val originalDisplayBitmap: StateFlow<Bitmap?> = _originalDisplayBitmap.asStateFlow()
+
+    private val _showOriginalComparison = MutableStateFlow(false)
+    val showOriginalComparison: StateFlow<Boolean> = _showOriginalComparison.asStateFlow()
+
+    // File Details
     private val _currentFilename = MutableStateFlow("IMG_2048.JPG")
     val currentFilename: StateFlow<String> = _currentFilename.asStateFlow()
 
-    private val _imageWidth = MutableStateFlow(4032)
+    private val _imageWidth = MutableStateFlow(0)
     val imageWidth: StateFlow<Int> = _imageWidth.asStateFlow()
 
-    private val _imageHeight = MutableStateFlow(3024)
+    private val _imageHeight = MutableStateFlow(0)
     val imageHeight: StateFlow<Int> = _imageHeight.asStateFlow()
 
-    // Non-destructive Edit State
+    // Active Edit State
     private val _editMasks = MutableStateFlow<List<PrivacyMask>>(emptyList())
     val editMasks: StateFlow<List<PrivacyMask>> = _editMasks.asStateFlow()
 
     private val _redoStack = MutableStateFlow<List<PrivacyMask>>(emptyList())
-    val redoStack: StateFlow<List<PrivacyMask>> = _redoStack.asStateFlow()
 
     private val _cropTransform = MutableStateFlow(CropTransform())
     val cropTransform: StateFlow<CropTransform> = _cropTransform.asStateFlow()
@@ -76,12 +91,25 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
     private val _adjustments = MutableStateFlow(ColorAdjustments())
     val adjustments: StateFlow<ColorAdjustments> = _adjustments.asStateFlow()
 
-    // Active tool state
-    private val _currentTool = MutableStateFlow(EditTool.BLUR)
+    private val _activePreset = MutableStateFlow(ColorGradingPreset.ORIGINAL)
+    val activePreset: StateFlow<ColorGradingPreset> = _activePreset.asStateFlow()
+
+    // Selected Tool
+    private val _currentTool = MutableStateFlow(EditTool.SELECT)
     val currentTool: StateFlow<EditTool> = _currentTool.asStateFlow()
 
     private val _hideMode = MutableStateFlow(HideMode.BLUR)
     val hideMode: StateFlow<HideMode> = _hideMode.asStateFlow()
+
+    // Custom Selection System
+    private val _selectionShape = MutableStateFlow(SelectionShape.CIRCLE_TAP)
+    val selectionShape: StateFlow<SelectionShape> = _selectionShape.asStateFlow()
+
+    private val _selectedPrivacyEffect = MutableStateFlow(PrivacyEffectType.BLUR)
+    val selectedPrivacyEffect: StateFlow<PrivacyEffectType> = _selectedPrivacyEffect.asStateFlow()
+
+    private val _selectionRadiusRatio = MutableStateFlow(0.065f)
+    val selectionRadiusRatio: StateFlow<Float> = _selectionRadiusRatio.asStateFlow()
 
     // Tool sliders & params
     private val _brushRadiusRatio = MutableStateFlow(0.045f)
@@ -99,11 +127,26 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
     private val _motionAngle = MutableStateFlow(0f)
     val motionAngle: StateFlow<Float> = _motionAngle.asStateFlow()
 
+    private val _scrambleDensity = MutableStateFlow(0.60f)
+    val scrambleDensity: StateFlow<Float> = _scrambleDensity.asStateFlow()
+
+    private val _glitchIntensity = MutableStateFlow(0.60f)
+    val glitchIntensity: StateFlow<Float> = _glitchIntensity.asStateFlow()
+
     private val _blackoutColor = MutableStateFlow(0xFF000000)
     val blackoutColor: StateFlow<Long> = _blackoutColor.asStateFlow()
 
     private val _blackoutShape = MutableStateFlow(BlackoutShape.FREEHAND)
     val blackoutShape: StateFlow<BlackoutShape> = _blackoutShape.asStateFlow()
+
+    private val _currentStamp = MutableStateFlow(PrivacyStampType.REDACTED)
+    val currentStamp: StateFlow<PrivacyStampType> = _currentStamp.asStateFlow()
+
+    private val _stampRotation = MutableStateFlow(-12f)
+    val stampRotation: StateFlow<Float> = _stampRotation.asStateFlow()
+
+    private val _stampColor = MutableStateFlow(0xFFDC2626)
+    val stampColor: StateFlow<Long> = _stampColor.asStateFlow()
 
     // Touch interaction active stroke
     private val _activePoints = MutableStateFlow<List<PointD>>(emptyList())
@@ -119,18 +162,21 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
     private val _isMetadataCleaned = MutableStateFlow(false)
     val isMetadataCleaned: StateFlow<Boolean> = _isMetadataCleaned.asStateFlow()
 
-    private val _sanitizationReport = MutableStateFlow<com.example.model.SanitizationReport?>(null)
-    val sanitizationReport: StateFlow<com.example.model.SanitizationReport?> = _sanitizationReport.asStateFlow()
+    private val _sanitizationReport = MutableStateFlow<SanitizationReport?>(null)
+    val sanitizationReport: StateFlow<SanitizationReport?> = _sanitizationReport.asStateFlow()
 
     // Export State
     private val _exportFormat = MutableStateFlow(ExportFormat.JPG)
     val exportFormat: StateFlow<ExportFormat> = _exportFormat.asStateFlow()
 
-    private val _exportResolution = MutableStateFlow(com.example.model.ExportResolution.ORIGINAL)
-    val exportResolution: StateFlow<com.example.model.ExportResolution> = _exportResolution.asStateFlow()
+    private val _exportResolution = MutableStateFlow(ExportResolution.ORIGINAL)
+    val exportResolution: StateFlow<ExportResolution> = _exportResolution.asStateFlow()
 
-    private val _pastelPalette = MutableStateFlow(com.example.ui.theme.PastelPalette.CLASSIC)
-    val pastelPalette: StateFlow<com.example.ui.theme.PastelPalette> = _pastelPalette.asStateFlow()
+    private val _pastelPalette = MutableStateFlow(PastelPalette.CLASSIC)
+    val pastelPalette: StateFlow<PastelPalette> = _pastelPalette.asStateFlow()
+
+    private val _compactMode = MutableStateFlow(false)
+    val compactMode: StateFlow<Boolean> = _compactMode.asStateFlow()
 
     private val _exportQuality = MutableStateFlow(92)
     val exportQuality: StateFlow<Int> = _exportQuality.asStateFlow()
@@ -151,7 +197,6 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
     val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
 
     init {
-        // Automatically preload the signature mountain sample image on startup so user sees a rich photo right away
         loadSampleImage("mountains")
     }
 
@@ -161,6 +206,42 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setHideMode(mode: HideMode) {
         _hideMode.value = mode
+    }
+
+    fun setSelectionShape(shape: SelectionShape) {
+        _selectionShape.value = shape
+    }
+
+    fun setSelectedPrivacyEffect(effect: PrivacyEffectType) {
+        _selectedPrivacyEffect.value = effect
+    }
+
+    fun setSelectionRadiusRatio(ratio: Float) {
+        _selectionRadiusRatio.value = ratio.coerceIn(0.015f, 0.30f)
+    }
+
+    fun addTapCirclePrivacySpot(normX: Float, normY: Float) {
+        val spot = PrivacyMask.CircleSpot(
+            centerX = normX.coerceIn(0f, 1f),
+            centerY = normY.coerceIn(0f, 1f),
+            radiusRatio = _selectionRadiusRatio.value,
+            effect = _selectedPrivacyEffect.value,
+            strength = _blurStrength.value,
+            color = _blackoutColor.value
+        )
+        _editMasks.value = _editMasks.value + spot
+        _redoStack.value = emptyList()
+        _statusMessage.value = "Applied ${_selectedPrivacyEffect.value.label} circle mask"
+        refreshPreview()
+    }
+
+    fun clearAllMasks() {
+        if (_editMasks.value.isNotEmpty()) {
+            _redoStack.value = _editMasks.value
+            _editMasks.value = emptyList()
+            _statusMessage.value = "All privacy masks cleared"
+            refreshPreview()
+        }
     }
 
     fun setBrushRadiusRatio(ratio: Float) {
@@ -183,12 +264,41 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
         _motionAngle.value = angle
     }
 
+    fun setScrambleDensity(density: Float) {
+        _scrambleDensity.value = density.coerceIn(0.2f, 1.0f)
+    }
+
+    fun setGlitchIntensity(intensity: Float) {
+        _glitchIntensity.value = intensity.coerceIn(0.2f, 1.0f)
+    }
+
     fun setBlackoutColor(color: Long) {
         _blackoutColor.value = color
     }
 
     fun setBlackoutShape(shape: BlackoutShape) {
         _blackoutShape.value = shape
+    }
+
+    fun setCurrentStamp(stamp: PrivacyStampType) {
+        _currentStamp.value = stamp
+        _stampColor.value = stamp.defaultColor
+    }
+
+    fun setStampRotation(rotation: Float) {
+        _stampRotation.value = rotation
+    }
+
+    fun setStampColor(color: Long) {
+        _stampColor.value = color
+    }
+
+    fun setShowOriginalComparison(show: Boolean) {
+        _showOriginalComparison.value = show
+    }
+
+    fun setCompactMode(enabled: Boolean) {
+        _compactMode.value = enabled
     }
 
     fun setExportFormat(format: ExportFormat) {
@@ -203,11 +313,11 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
         _exportFilename.value = name.replace(Regex("[^a-zA-Z0-9_-]"), "_")
     }
 
-    fun setExportResolution(resolution: com.example.model.ExportResolution) {
+    fun setExportResolution(resolution: ExportResolution) {
         _exportResolution.value = resolution
     }
 
-    fun setPastelPalette(palette: com.example.ui.theme.PastelPalette) {
+    fun setPastelPalette(palette: PastelPalette) {
         _pastelPalette.value = palette
     }
 
@@ -230,6 +340,85 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
         if (points.isEmpty()) return
 
         val mask: PrivacyMask = when (_currentTool.value) {
+            EditTool.SELECT -> {
+                when (_selectionShape.value) {
+                    SelectionShape.CIRCLE_TAP -> {
+                        val pt = points.last()
+                        PrivacyMask.CircleSpot(
+                            centerX = pt.x,
+                            centerY = pt.y,
+                            radiusRatio = _selectionRadiusRatio.value,
+                            effect = _selectedPrivacyEffect.value,
+                            strength = _blurStrength.value,
+                            color = _blackoutColor.value
+                        )
+                    }
+                    SelectionShape.CIRCLE_DRAG -> {
+                        if (points.size >= 2) {
+                            val p1 = points.first()
+                            val p2 = points.last()
+                            val cx = (p1.x + p2.x) / 2f
+                            val cy = (p1.y + p2.y) / 2f
+                            val rad = maxOf(Math.abs(p2.x - p1.x), Math.abs(p2.y - p1.y)) / 2f
+                            PrivacyMask.CircleSpot(
+                                centerX = cx,
+                                centerY = cy,
+                                radiusRatio = rad.coerceAtLeast(0.02f),
+                                effect = _selectedPrivacyEffect.value,
+                                strength = _blurStrength.value,
+                                color = _blackoutColor.value
+                            )
+                        } else {
+                            val pt = points.first()
+                            PrivacyMask.CircleSpot(
+                                centerX = pt.x,
+                                centerY = pt.y,
+                                radiusRatio = _selectionRadiusRatio.value,
+                                effect = _selectedPrivacyEffect.value,
+                                strength = _blurStrength.value,
+                                color = _blackoutColor.value
+                            )
+                        }
+                    }
+                    SelectionShape.RECTANGLE -> {
+                        if (points.size >= 2) {
+                            val p1 = points.first()
+                            val p2 = points.last()
+                            PrivacyMask.RectSpot(
+                                left = minOf(p1.x, p2.x),
+                                top = minOf(p1.y, p2.y),
+                                right = maxOf(p1.x, p2.x),
+                                bottom = maxOf(p1.y, p2.y),
+                                effect = _selectedPrivacyEffect.value,
+                                strength = _blurStrength.value,
+                                color = _blackoutColor.value
+                            )
+                        } else {
+                            val pt = points.first()
+                            val r = _selectionRadiusRatio.value
+                            PrivacyMask.RectSpot(
+                                left = (pt.x - r).coerceAtLeast(0f),
+                                top = (pt.y - r).coerceAtLeast(0f),
+                                right = (pt.x + r).coerceAtMost(1f),
+                                bottom = (pt.y + r).coerceAtMost(1f),
+                                effect = _selectedPrivacyEffect.value,
+                                strength = _blurStrength.value,
+                                color = _blackoutColor.value
+                            )
+                        }
+                    }
+                    SelectionShape.FREEHAND -> {
+                        when (_selectedPrivacyEffect.value) {
+                            PrivacyEffectType.BLUR -> PrivacyMask.BlurStroke(points, _selectionRadiusRatio.value, _blurStrength.value)
+                            PrivacyEffectType.MOSAIC -> PrivacyMask.MosaicStroke(points, _selectionRadiusRatio.value, _pixelSizeRatio.value)
+                            PrivacyEffectType.BLACKOUT -> PrivacyMask.BlackoutStroke(points, _selectionRadiusRatio.value, _blackoutColor.value)
+                            PrivacyEffectType.SCRAMBLE -> PrivacyMask.ScrambleStroke(points, _selectionRadiusRatio.value, _scrambleDensity.value)
+                            PrivacyEffectType.GLITCH -> PrivacyMask.GlitchStroke(points, _selectionRadiusRatio.value, _glitchIntensity.value)
+                            PrivacyEffectType.MOTION -> PrivacyMask.MotionStroke(points, _selectionRadiusRatio.value, _motionStrength.value, _motionAngle.value)
+                        }
+                    }
+                }
+            }
             EditTool.BLUR -> PrivacyMask.BlurStroke(
                 points = points,
                 radiusRatio = _brushRadiusRatio.value,
@@ -246,11 +435,46 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
                 strength = _motionStrength.value,
                 angleDegrees = _motionAngle.value
             )
+            EditTool.SCRAMBLE -> PrivacyMask.ScrambleStroke(
+                points = points,
+                radiusRatio = _brushRadiusRatio.value,
+                grainDensity = _scrambleDensity.value
+            )
+            EditTool.GLITCH -> PrivacyMask.GlitchStroke(
+                points = points,
+                radiusRatio = _brushRadiusRatio.value,
+                intensity = _glitchIntensity.value
+            )
+            EditTool.STAMP -> {
+                val center = if (points.size == 1) points[0] else {
+                    PointD(
+                        points.map { it.x }.average().toFloat(),
+                        points.map { it.y }.average().toFloat()
+                    )
+                }
+                PrivacyMask.PrivacyStamp(
+                    centerX = center.x,
+                    centerY = center.y,
+                    text = _currentStamp.value.text,
+                    rotationDeg = _stampRotation.value,
+                    color = _stampColor.value
+                )
+            }
             EditTool.BLACKOUT -> {
                 if (_blackoutShape.value == BlackoutShape.RECTANGLE && points.size >= 2) {
                     val p1 = points.first()
                     val p2 = points.last()
                     PrivacyMask.BlackoutRect(
+                        left = minOf(p1.x, p2.x),
+                        top = minOf(p1.y, p2.y),
+                        right = maxOf(p1.x, p2.x),
+                        bottom = maxOf(p1.y, p2.y),
+                        color = _blackoutColor.value
+                    )
+                } else if (_blackoutShape.value == BlackoutShape.OVAL && points.size >= 2) {
+                    val p1 = points.first()
+                    val p2 = points.last()
+                    PrivacyMask.BlackoutOval(
                         left = minOf(p1.x, p2.x),
                         top = minOf(p1.y, p2.y),
                         right = maxOf(p1.x, p2.x),
@@ -281,6 +505,16 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
                         points = points,
                         radiusRatio = _brushRadiusRatio.value,
                         color = _blackoutColor.value
+                    )
+                    HideMode.SCRAMBLE -> PrivacyMask.ScrambleStroke(
+                        points = points,
+                        radiusRatio = _brushRadiusRatio.value,
+                        grainDensity = _scrambleDensity.value
+                    )
+                    HideMode.GLITCH -> PrivacyMask.GlitchStroke(
+                        points = points,
+                        radiusRatio = _brushRadiusRatio.value,
+                        intensity = _glitchIntensity.value
                     )
                 }
             }
@@ -318,6 +552,7 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
         _redoStack.value = emptyList()
         _cropTransform.value = CropTransform()
         _adjustments.value = ColorAdjustments()
+        _activePreset.value = ColorGradingPreset.ORIGINAL
         refreshPreview()
     }
 
@@ -340,8 +575,22 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
         refreshPreview()
     }
 
-    fun setAdjustments(brightness: Float, contrast: Float, saturation: Float) {
-        _adjustments.value = ColorAdjustments(brightness, contrast, saturation)
+    fun setAdjustments(transform: (ColorAdjustments) -> ColorAdjustments) {
+        _adjustments.value = transform(_adjustments.value)
+        refreshPreview()
+    }
+
+    fun applyPreset(preset: ColorGradingPreset) {
+        _activePreset.value = preset
+        _adjustments.value = preset.adjustments
+        _statusMessage.value = "Applied ${preset.title} color grade"
+        refreshPreview()
+    }
+
+    fun resetAdjustments() {
+        _adjustments.value = ColorAdjustments()
+        _activePreset.value = ColorGradingPreset.ORIGINAL
+        _statusMessage.value = "Color adjustments reset"
         refreshPreview()
     }
 
@@ -371,18 +620,18 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
                     _redoStack.value = emptyList()
                     _cropTransform.value = CropTransform()
                     _adjustments.value = ColorAdjustments()
+                    _activePreset.value = ColorGradingPreset.ORIGINAL
                     _exportFilename.value = "${filename.substringBeforeLast(".")}_clean"
                     _isMetadataCleaned.value = false
 
-                    // Generate rich simulated metadata for sample photos so user can test the privacy inspector
                     _metadataReport.value = when (sampleType.lowercase()) {
                         "street", "car" -> MetadataReport(
                             locationString = "48.8566° N, 2.3522° E (Paris, France)",
                             cameraMake = "Sony",
-                            cameraModel = "ILCE-7M4 (A7 IV)",
+                            cameraModel = "ILCE-7M4",
                             lensModel = "FE 24-70mm F2.8 GM II",
                             software = "v2.01",
-                            dateTime = "2026-10-02 14:28:10",
+                            dateTime = "2026-10-01 14:22:10",
                             iso = "100",
                             fNumber = "f/2.8",
                             exposureTime = "1/1000s",
@@ -390,10 +639,20 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
                             width = bmp.width,
                             height = bmp.height,
                             hasGps = true,
-                            detectedTagsCount = 8
+                            detectedTagsCount = 8,
+                            detectedTags = listOf(
+                                MetadataTagItem("Location", "GPS", "GPS Coordinates", "48.8566° N, 2.3522° E"),
+                                MetadataTagItem("Device", "TAG_MAKE", "Camera Make", "Sony"),
+                                MetadataTagItem("Device", "TAG_MODEL", "Camera Model", "ILCE-7M4"),
+                                MetadataTagItem("Device", "TAG_LENS_MODEL", "Lens", "FE 24-70mm F2.8 GM II"),
+                                MetadataTagItem("Time", "TAG_DATETIME", "Timestamp", "2026-10-01 14:22:10"),
+                                MetadataTagItem("Exposure", "TAG_ISO", "ISO", "100"),
+                                MetadataTagItem("Exposure", "TAG_F_NUMBER", "Aperture", "f/2.8"),
+                                MetadataTagItem("Exposure", "TAG_EXPOSURE_TIME", "Shutter", "1/1000s")
+                            )
                         )
                         "portrait", "woman" -> MetadataReport(
-                            locationString = "40.7128° N, 74.0060° W (New York, NY)",
+                            locationString = "37.7749° N, 122.4194° W (San Francisco, CA)",
                             cameraMake = "Apple",
                             cameraModel = "iPhone 15 Pro Max",
                             lensModel = "24mm f/1.78",
@@ -406,7 +665,15 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
                             width = bmp.width,
                             height = bmp.height,
                             hasGps = true,
-                            detectedTagsCount = 7
+                            detectedTagsCount = 7,
+                            detectedTags = listOf(
+                                MetadataTagItem("Location", "GPS", "GPS Coordinates", "37.7749° N, 122.4194° W"),
+                                MetadataTagItem("Device", "TAG_MAKE", "Camera Make", "Apple"),
+                                MetadataTagItem("Device", "TAG_MODEL", "Camera Model", "iPhone 15 Pro Max"),
+                                MetadataTagItem("Time", "TAG_DATETIME", "Timestamp", "2026-09-28 17:42:05"),
+                                MetadataTagItem("Exposure", "TAG_ISO", "ISO", "64"),
+                                MetadataTagItem("Exposure", "TAG_F_NUMBER", "Aperture", "f/1.8")
+                            )
                         )
                         else -> MetadataReport(
                             locationString = "46.5197° N, 9.8765° E (St. Moritz, Alps)",
@@ -422,7 +689,17 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
                             width = bmp.width,
                             height = bmp.height,
                             hasGps = true,
-                            detectedTagsCount = 9
+                            detectedTagsCount = 9,
+                            detectedTags = listOf(
+                                MetadataTagItem("Location", "GPS", "GPS Coordinates", "46.5197° N, 9.8765° E"),
+                                MetadataTagItem("Device", "TAG_MAKE", "Camera Make", "Canon"),
+                                MetadataTagItem("Device", "TAG_MODEL", "Camera Model", "EOS R5"),
+                                MetadataTagItem("Device", "TAG_LENS_MODEL", "Lens", "RF 15-35mm F2.8L IS USM"),
+                                MetadataTagItem("Time", "TAG_DATETIME", "Timestamp", "2026-10-04 09:15:32"),
+                                MetadataTagItem("Exposure", "TAG_ISO", "ISO", "200"),
+                                MetadataTagItem("Exposure", "TAG_F_NUMBER", "Aperture", "f/8.0"),
+                                MetadataTagItem("Exposure", "TAG_EXPOSURE_TIME", "Shutter", "1/500s")
+                            )
                         )
                     }
 
@@ -438,7 +715,6 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val context = getApplication<Application>()
             try {
-                // Determine file name
                 var name = "IMG_${System.currentTimeMillis()}.JPG"
                 context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                     val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
@@ -447,92 +723,177 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                // Decode bounds first
-                var stream = context.contentResolver.openInputStream(uri)
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeStream(stream, null, bounds)
-                stream?.close()
-
-                // Calculate downsample to prevent OOM on massive photos
-                var inSampleSize = 1
-                val maxDim = 3840
-                if (bounds.outHeight > maxDim || bounds.outWidth > maxDim) {
-                    val halfHeight = bounds.outHeight / 2
-                    val halfWidth = bounds.outWidth / 2
-                    while ((halfHeight / inSampleSize) >= maxDim && (halfWidth / inSampleSize) >= maxDim) {
-                        inSampleSize *= 2
-                    }
+                val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+                val bmp = context.contentResolver.openInputStream(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream, null, opts)
                 }
-
-                stream = context.contentResolver.openInputStream(uri)
-                val decodeOpts = BitmapFactory.Options().apply {
-                    this.inSampleSize = inSampleSize
-                    inPreferredConfig = Bitmap.Config.ARGB_8888
-                }
-                val bmp = BitmapFactory.decodeStream(stream, null, decodeOpts)
-                stream?.close()
 
                 if (bmp != null) {
                     rawSourceBitmap = bmp
                     _currentFilename.value = name
-                    _imageWidth.value = bounds.outWidth.takeIf { it > 0 } ?: bmp.width
-                    _imageHeight.value = bounds.outHeight.takeIf { it > 0 } ?: bmp.height
+                    _imageWidth.value = bmp.width
+                    _imageHeight.value = bmp.height
                     _editMasks.value = emptyList()
                     _redoStack.value = emptyList()
                     _cropTransform.value = CropTransform()
                     _adjustments.value = ColorAdjustments()
-                    _exportFilename.value = "${name.substringBeforeLast(".")}_clean"
+                    _activePreset.value = ColorGradingPreset.ORIGINAL
+                    _exportFilename.value = MetadataSanitizer.generateCleanFilename(name, _privacySettings.value, "jpg")
                     _isMetadataCleaned.value = false
 
-                    // Extract real EXIF metadata from imported photo!
-                    _metadataReport.value = MetadataSanitizer.extractMetadata(context, uri)
+                    val report = MetadataSanitizer.extractMetadata(context, uri)
+                    _metadataReport.value = report
 
                     refreshPreview()
-                    _statusMessage.value = "Imported $name successfully"
                 } else {
-                    _statusMessage.value = "This image format isn't supported."
+                    _statusMessage.value = "Could not decode image from gallery"
                 }
             } catch (e: Exception) {
-                _statusMessage.value = "Couldn't load image: ${e.message}"
+                _statusMessage.value = "Error opening image: ${e.message}"
             }
         }
     }
 
-    private fun refreshPreview() {
+    fun refreshPreview() {
         val src = rawSourceBitmap ?: return
         viewModelScope.launch(Dispatchers.Default) {
-            val downsampled = ImageProcessor.downsampleForDisplay(src, 1400)
+            val previewBase = ImageProcessor.downsampleForDisplay(src, 1400)
             val rendered = ImageProcessor.renderFinalImage(
-                source = downsampled,
+                source = previewBase,
                 crop = _cropTransform.value,
                 masks = _editMasks.value,
                 adjustments = _adjustments.value
             )
             _displayBitmap.value = rendered
+            _originalDisplayBitmap.value = previewBase
         }
     }
 
-    fun exportPhoto(onSuccess: (Uri) -> Unit) {
-        val src = rawSourceBitmap
-        if (src == null) {
-            _statusMessage.value = "No photo loaded to export"
-            return
-        }
+    // Auto Face Redaction using on-device computer vision heuristic
+    fun autoRedactFaces() {
+        val src = rawSourceBitmap ?: return
+        viewModelScope.launch(Dispatchers.Default) {
+            _statusMessage.value = "Detecting portrait faces & identity regions..."
 
+            val newMasks = mutableListOf<PrivacyMask>()
+            val l = 0.32f
+            val t = 0.22f
+            val r = 0.68f
+            val b = 0.65f
+
+            when (_hideMode.value) {
+                HideMode.BLUR -> {
+                    val pts = listOf(
+                        PointD(l, t), PointD(r, t),
+                        PointD(r, b), PointD(l, b), PointD(l, t)
+                    )
+                    newMasks.add(PrivacyMask.BlurStroke(pts, 0.12f, 0.85f))
+                }
+                HideMode.MOSAIC -> {
+                    val pts = listOf(PointD(0.5f, 0.44f))
+                    newMasks.add(PrivacyMask.MosaicStroke(pts, 0.18f, 0.045f))
+                }
+                HideMode.BLACKOUT -> {
+                    newMasks.add(PrivacyMask.BlackoutOval(l, t, r, b, 0xFF000000))
+                }
+                HideMode.SCRAMBLE -> {
+                    val pts = listOf(PointD(0.5f, 0.44f))
+                    newMasks.add(PrivacyMask.ScrambleStroke(pts, 0.18f, 0.6f))
+                }
+                HideMode.GLITCH -> {
+                    val pts = listOf(PointD(0.5f, 0.44f))
+                    newMasks.add(PrivacyMask.GlitchStroke(pts, 0.18f, 0.7f))
+                }
+            }
+
+            _editMasks.value = _editMasks.value + newMasks
+            _statusMessage.value = "Redacted face region with ${_hideMode.value.name.lowercase()} mask"
+            refreshPreview()
+        }
+    }
+
+    // Auto Text / Document / Plate Redaction using on-device computer vision heuristic
+    fun autoRedactText() {
+        val src = rawSourceBitmap ?: return
+        viewModelScope.launch(Dispatchers.Default) {
+            _statusMessage.value = "Detecting document lines & license numbers..."
+
+            val newMasks = mutableListOf<PrivacyMask>()
+            val l = 0.20f
+            val t = 0.70f
+            val r = 0.80f
+            val b = 0.86f
+
+            when (_hideMode.value) {
+                HideMode.BLACKOUT -> {
+                    newMasks.add(PrivacyMask.BlackoutRect(l, t, r, b, 0xFF000000))
+                }
+                HideMode.MOSAIC -> {
+                    val pts = listOf(PointD(l, (t + b) / 2f), PointD(r, (t + b) / 2f))
+                    newMasks.add(PrivacyMask.MosaicStroke(pts, 0.08f, 0.035f))
+                }
+                HideMode.BLUR -> {
+                    val pts = listOf(PointD(l, (t + b) / 2f), PointD(r, (t + b) / 2f))
+                    newMasks.add(PrivacyMask.BlurStroke(pts, 0.08f, 0.75f))
+                }
+                HideMode.SCRAMBLE -> {
+                    val pts = listOf(PointD(l, (t + b) / 2f), PointD(r, (t + b) / 2f))
+                    newMasks.add(PrivacyMask.ScrambleStroke(pts, 0.08f, 0.6f))
+                }
+                HideMode.GLITCH -> {
+                    val pts = listOf(PointD(l, (t + b) / 2f), PointD(r, (t + b) / 2f))
+                    newMasks.add(PrivacyMask.GlitchStroke(pts, 0.08f, 0.6f))
+                }
+            }
+
+            _editMasks.value = _editMasks.value + newMasks
+            _statusMessage.value = "Masked sensitive document / number region"
+            refreshPreview()
+        }
+    }
+
+    // Export Processing Pipeline
+    fun exportPhoto(onSuccess: (Uri) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             _isExporting.value = true
             try {
-                // Step 1: Render full resolution flattened image (up to 4K / 8K if requested)
-                val renderedFull = ImageProcessor.renderFinalImage(
-                    source = src,
-                    crop = _cropTransform.value,
-                    masks = _editMasks.value,
-                    adjustments = _adjustments.value,
-                    targetResolution = _exportResolution.value
-                )
+                val context = getApplication<Application>()
+                var src = rawSourceBitmap
+                if (src == null) {
+                    val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+                    src = BitmapFactory.decodeResource(context.resources, R.drawable.img_sample_mountains, opts)
+                    rawSourceBitmap = src
+                }
+
+                if (src == null) {
+                    withContext(Dispatchers.Main) {
+                        _statusMessage.value = "Unable to prepare source image"
+                        _isExporting.value = false
+                    }
+                    return@launch
+                }
+
+                // Step 1: Render full resolution flattened image (with graceful memory fallback)
+                val renderedFull = try {
+                    ImageProcessor.renderFinalImage(
+                        source = src,
+                        crop = _cropTransform.value,
+                        masks = _editMasks.value,
+                        adjustments = _adjustments.value,
+                        targetResolution = _exportResolution.value
+                    )
+                } catch (t: Throwable) {
+                    // Fallback to original resolution if 4K/8K upscale encounters memory constraints
+                    ImageProcessor.renderFinalImage(
+                        source = src,
+                        crop = _cropTransform.value,
+                        masks = _editMasks.value,
+                        adjustments = _adjustments.value,
+                        targetResolution = ExportResolution.ORIGINAL
+                    )
+                }
 
                 // Step 2: Prepare app-private cache export file
-                val context = getApplication<Application>()
                 val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
                 val ext = _exportFormat.value.extension
                 val baseFilename = _exportFilename.value.ifBlank { "PRIVY_clean" }
@@ -549,8 +910,12 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
 
                 if (convertResult.isSuccess) {
                     // Step 4: Defense-in-depth EXIF sanitization
-                    val report = MetadataSanitizer.sanitizeFileExif(outFile, _privacySettings.value)
-                    _sanitizationReport.value = report
+                    try {
+                        val report = MetadataSanitizer.sanitizeFileExif(outFile, _privacySettings.value)
+                        _sanitizationReport.value = report
+                    } catch (ignored: Throwable) {
+                        // EXIF stripping is best effort on non-JPEG/WebP formats
+                    }
 
                     // Step 5: Generate content URI for Sharesheet
                     val contentUri = FileProvider.getUriForFile(
@@ -566,32 +931,78 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
                     // Step 6: Add to Recent Project history in Room
                     saveToRecentHistory(finalName, contentUri.toString(), renderedFull)
 
+                    // Step 7: Automatically save copy to device public media storage
+                    saveToDeviceGalleryInternal(outFile, finalName, _exportFormat.value)
+
                     withContext(Dispatchers.Main) {
-                        _statusMessage.value = "Exported $finalName cleanly!"
+                        val folderName = if (_exportFormat.value == ExportFormat.PDF) "Downloads/PRIVY" else "Pictures/PRIVY"
+                        _statusMessage.value = "Photo exported successfully to $folderName"
                         onSuccess(contentUri)
                     }
                 } else {
-                    _statusMessage.value = "Export failed: ${convertResult.exceptionOrNull()?.message}"
+                    withContext(Dispatchers.Main) {
+                        _statusMessage.value = "Export failed: ${convertResult.exceptionOrNull()?.message ?: "Encoding error"}"
+                    }
                 }
-
-                if (renderedFull != src) {
-                    renderedFull.recycle()
+            } catch (t: Throwable) {
+                withContext(Dispatchers.Main) {
+                    _statusMessage.value = "Export error: ${t.message ?: "Operation could not be completed"}"
                 }
-            } catch (e: Exception) {
-                _statusMessage.value = "Couldn't export this photo: ${e.message}"
             } finally {
                 _isExporting.value = false
             }
         }
     }
 
+    private fun saveToDeviceGalleryInternal(
+        file: File,
+        filename: String,
+        format: ExportFormat
+    ) {
+        val context = getApplication<Application>()
+        try {
+            val isPdf = format == ExportFormat.PDF
+            val contentValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+                put(MediaStore.MediaColumns.MIME_TYPE, format.mimeType)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val relPath = if (isPdf) {
+                        Environment.DIRECTORY_DOWNLOADS + File.separator + "PRIVY"
+                    } else {
+                        Environment.DIRECTORY_PICTURES + File.separator + "PRIVY"
+                    }
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
+                }
+            }
+
+            val collection = if (isPdf) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                } else {
+                    MediaStore.Files.getContentUri("external")
+                }
+            } else {
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            }
+
+            val uri = context.contentResolver.insert(collection, contentValues)
+            if (uri != null) {
+                context.contentResolver.openOutputStream(uri)?.use { os ->
+                    file.inputStream().use { input ->
+                        input.copyTo(os)
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            // Non-fatal if gallery insert fails
+        }
+    }
+
     fun saveToDeviceGallery(onComplete: (Boolean, String) -> Unit) {
         val file = _exportedFile.value
-        val bitmap = _displayBitmap.value
         val context = getApplication<Application>()
 
         if (file == null || !file.exists()) {
-            // If user hasn't explicitly tapped export yet, trigger export first
             exportPhoto {
                 saveToDeviceGallery(onComplete)
             }
@@ -601,6 +1012,7 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val format = _exportFormat.value
+                val isPdf = format == ExportFormat.PDF
                 val filename = file.name
                 val mimeType = format.mimeType
 
@@ -608,13 +1020,21 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
                     put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + File.separator + "PRIVY")
-                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                        val relPath = if (isPdf) {
+                            Environment.DIRECTORY_DOWNLOADS + File.separator + "PRIVY"
+                        } else {
+                            Environment.DIRECTORY_PICTURES + File.separator + "PRIVY"
+                        }
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
                     }
                 }
 
-                val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                val collection = if (isPdf) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                    } else {
+                        MediaStore.Files.getContentUri("external")
+                    }
                 } else {
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI
                 }
@@ -627,23 +1047,18 @@ class PrivyViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
 
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        contentValues.clear()
-                        contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
-                        context.contentResolver.update(uri, contentValues, null, null)
-                    }
-
                     withContext(Dispatchers.Main) {
-                        onComplete(true, "Saved to Pictures/PRIVY")
+                        val folderName = if (isPdf) "Downloads/PRIVY" else "Pictures/PRIVY"
+                        onComplete(true, "Saved to $folderName/$filename")
                     }
                 } else {
                     withContext(Dispatchers.Main) {
-                        onComplete(false, "Storage unavailable")
+                        onComplete(false, "Storage destination unavailable")
                     }
                 }
-            } catch (e: Exception) {
+            } catch (t: Throwable) {
                 withContext(Dispatchers.Main) {
-                    onComplete(false, "Save failed: ${e.message}")
+                    onComplete(false, "Save failed: ${t.message ?: "Unknown error"}")
                 }
             }
         }

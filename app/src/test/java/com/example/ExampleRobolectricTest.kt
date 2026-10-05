@@ -5,11 +5,13 @@ import android.graphics.Bitmap
 import androidx.exifinterface.media.ExifInterface
 import androidx.test.core.app.ApplicationProvider
 import com.example.model.ColorAdjustments
+import com.example.model.ColorGradingPreset
 import com.example.model.CropTransform
 import com.example.model.ExportFormat
 import com.example.model.PointD
 import com.example.model.PrivacyMask
 import com.example.model.PrivacySettings
+import com.example.model.PrivacyStampType
 import com.example.processing.ImageFormatConverter
 import com.example.processing.ImageProcessor
 import com.example.processing.MetadataSanitizer
@@ -57,17 +59,63 @@ class ExampleRobolectricTest {
     fun testImageRenderingPipeline() {
         val bmp = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
         val masks = listOf(
-            PrivacyMask.BlackoutRect(0.1f, 0.1f, 0.5f, 0.5f, 0xFF000000)
+            PrivacyMask.CircleSpot(0.25f, 0.25f, 0.1f, com.example.model.PrivacyEffectType.BLUR, 0.8f),
+            PrivacyMask.CircleSpot(0.75f, 0.25f, 0.1f, com.example.model.PrivacyEffectType.MOSAIC, 0.8f),
+            PrivacyMask.CircleSpot(0.25f, 0.75f, 0.1f, com.example.model.PrivacyEffectType.BLACKOUT, 0.8f, 0xFF000000),
+            PrivacyMask.CircleSpot(0.75f, 0.75f, 0.1f, com.example.model.PrivacyEffectType.SCRAMBLE, 0.8f),
+            PrivacyMask.RectSpot(0.4f, 0.4f, 0.6f, 0.6f, com.example.model.PrivacyEffectType.GLITCH, 0.7f),
+            PrivacyMask.BlackoutRect(0.1f, 0.1f, 0.3f, 0.3f, 0xFF000000),
+            PrivacyMask.BlackoutOval(0.6f, 0.6f, 0.9f, 0.9f, 0xFF000000),
+            PrivacyMask.PrivacyStamp(0.5f, 0.5f, "REDACTED", -12f, 0xFFDC2626)
         )
         val rendered = ImageProcessor.renderFinalImage(
             source = bmp,
             crop = CropTransform(),
             masks = masks,
-            adjustments = ColorAdjustments()
+            adjustments = ColorAdjustments(brightness = 5f, contrast = 1.1f, saturation = 1.2f, temperature = 10f, vignette = 20f)
         )
         assertNotNull(rendered)
         assertEquals(100, rendered.width)
         assertEquals(100, rendered.height)
+    }
+
+    @Test
+    fun testMultiFormatExport() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val bmp = Bitmap.createBitmap(60, 60, Bitmap.Config.ARGB_8888)
+        val formats = listOf(
+            ExportFormat.JPG,
+            ExportFormat.PNG,
+            ExportFormat.WEBP,
+            ExportFormat.BMP,
+            ExportFormat.PDF,
+            ExportFormat.TIFF
+        )
+
+        for (format in formats) {
+            val testFile = File(context.cacheDir, "test_export.${format.extension}")
+            val res = ImageFormatConverter.convertAndSave(bmp, format, 90, testFile)
+            assertTrue("Conversion for ${format.displayName} should succeed", res.isSuccess)
+            assertTrue("Exported file for ${format.displayName} should exist", testFile.exists())
+            assertTrue("Exported file for ${format.displayName} should not be empty", testFile.length() > 0)
+            testFile.delete()
+        }
+    }
+
+    @Test
+    fun testColorGradingPresets() {
+        val bmp = Bitmap.createBitmap(50, 50, Bitmap.Config.ARGB_8888)
+        for (preset in ColorGradingPreset.values()) {
+            val rendered = ImageProcessor.renderFinalImage(
+                source = bmp,
+                crop = CropTransform(),
+                masks = emptyList(),
+                adjustments = preset.adjustments
+            )
+            assertNotNull(rendered)
+            assertEquals(50, rendered.width)
+            assertEquals(50, rendered.height)
+        }
     }
 
     @Test

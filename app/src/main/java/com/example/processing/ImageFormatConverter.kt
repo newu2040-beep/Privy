@@ -55,16 +55,21 @@ object ImageFormatConverter {
             }
 
             ExportFormat.WEBP -> {
+                var compressed = false
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     val compressFormat = if (q >= 100) {
                         Bitmap.CompressFormat.WEBP_LOSSLESS
                     } else {
                         Bitmap.CompressFormat.WEBP_LOSSY
                     }
-                    bitmap.compress(compressFormat, q, outputStream)
+                    compressed = bitmap.compress(compressFormat, q, outputStream)
                 } else {
                     @Suppress("DEPRECATION")
-                    bitmap.compress(Bitmap.CompressFormat.WEBP, q, outputStream)
+                    compressed = bitmap.compress(Bitmap.CompressFormat.WEBP, q, outputStream)
+                }
+                if (!compressed) {
+                    // Fallback to PNG if native WEBP encoder is absent in environment
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
                 }
             }
 
@@ -85,7 +90,7 @@ object ImageFormatConverter {
                         if (formatEnum != null) {
                             compressed = bitmap.compress(formatEnum, q, outputStream)
                         }
-                    } catch (e: Exception) {
+                    } catch (e: Throwable) {
                         compressed = false
                     }
                 }
@@ -113,17 +118,43 @@ object ImageFormatConverter {
     }
 
     private fun writePdf(bitmap: Bitmap, outputStream: OutputStream) {
-        val document = PdfDocument()
-        val pageInfo = PdfDocument.PageInfo.Builder(bitmap.width, bitmap.height, 1).create()
-        val page = document.startPage(pageInfo)
+        try {
+            val document = PdfDocument()
+            val pageInfo = PdfDocument.PageInfo.Builder(bitmap.width, bitmap.height, 1).create()
+            val page = document.startPage(pageInfo)
 
-        val canvas = page.canvas
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        canvas.drawBitmap(bitmap, 0f, 0f, paint)
+            val canvas = page.canvas
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            canvas.drawBitmap(bitmap, 0f, 0f, paint)
 
-        document.finishPage(page)
-        document.writeTo(outputStream)
-        document.close()
+            document.finishPage(page)
+            document.writeTo(outputStream)
+            document.close()
+        } catch (e: Throwable) {
+            writeFallbackPdf(bitmap, outputStream)
+        }
+    }
+
+    private fun writeFallbackPdf(bitmap: Bitmap, outputStream: OutputStream) {
+        val baos = ByteArrayOutputStream()
+        val rgb = ensureOpaqueRgb(bitmap)
+        rgb.compress(Bitmap.CompressFormat.JPEG, 90, baos)
+        if (rgb != bitmap) rgb.recycle()
+        val jpegBytes = baos.toByteArray()
+
+        val sb = StringBuilder()
+        sb.append("%PDF-1.4\n")
+        sb.append("1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n")
+        sb.append("2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n")
+        sb.append("3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 ${bitmap.width} ${bitmap.height}] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >> endobj\n")
+        val streamContent = "q ${bitmap.width} 0 0 ${bitmap.height} 0 0 cm /Im1 Do Q"
+        sb.append("4 0 obj << /Length ${streamContent.length} >> stream\n$streamContent\nendstream\nendobj\n")
+        sb.append("5 0 obj << /Type /XObject /Subtype /Image /Width ${bitmap.width} /Height ${bitmap.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.size} >> stream\n")
+
+        outputStream.write(sb.toString().toByteArray(Charsets.ISO_8859_1))
+        outputStream.write(jpegBytes)
+        val tail = "\nendstream\nendobj\nxref\n0 6\n0000000000 65535 f \ntrailer << /Size 6 /Root 1 0 R >>\nstartxref\n%%EOF\n"
+        outputStream.write(tail.toByteArray(Charsets.ISO_8859_1))
     }
 
     /**

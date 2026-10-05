@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.Card
@@ -195,6 +196,32 @@ fun SettingsScreen(
                         )
                     }
                 }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Display & Responsive Layout
+        SettingsSectionHeader(title = "Display & Layout", icon = Icons.Default.PhoneAndroid)
+
+        val compactMode by viewModel.compactMode.collectAsState()
+
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp))
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                SettingsToggleRow(
+                    title = "Compact Mode",
+                    subtitle = "Resize controls, toolbars & canvas for small display phones",
+                    checked = compactMode,
+                    onCheckedChange = { checked ->
+                        viewModel.setCompactMode(checked)
+                    }
+                )
             }
         }
 

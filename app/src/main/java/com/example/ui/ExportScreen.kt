@@ -363,7 +363,7 @@ fun ExportScreen(
         Button(
             onClick = {
                 viewModel.exportPhoto { uri ->
-                    Toast.makeText(context, "Clean copy exported!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Clean copy exported & saved to Gallery!", Toast.LENGTH_SHORT).show()
                 }
             },
             enabled = !isExporting,
@@ -386,10 +386,18 @@ fun ExportScreen(
                 Spacer(modifier = Modifier.width(10.dp))
                 Text("Exporting clean copy…")
             } else {
-                Text(
-                    text = "Export Photo",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Download,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Export Photo (${exportFormat.displayName})",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+                    )
+                }
             }
         }
 
@@ -418,7 +426,7 @@ fun ExportScreen(
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("Save to device", style = MaterialTheme.typography.labelLarge)
+                Text("Save to Gallery", style = MaterialTheme.typography.labelLarge)
             }
 
             OutlinedButton(
@@ -448,7 +456,84 @@ fun ExportScreen(
             }
         }
 
+        // Export Success Card (when file is exported)
+        if (exportedFileUri != null) {
+            Spacer(modifier = Modifier.height(18.dp))
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.5.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(16.dp))
+                    .testTag("export_success_card")
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = PrivyGreen,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Export Ready & Saved!",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Clean ${exportFormat.displayName} photo generated with all metadata removed and visual privacy masks flattened.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                val uri = exportedFileUri ?: return@Button
+                                viewExportedImage(context, uri, exportFormat.mimeType)
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Open Image")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                val uri = exportedFileUri ?: return@OutlinedButton
+                                shareSanitizedImage(context, uri, exportFormat.mimeType)
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Share Now")
+                        }
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(40.dp))
+    }
+}
+
+private fun viewExportedImage(context: Context, uri: Uri, mimeType: String) {
+    try {
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mimeType)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        Toast.makeText(context, "No default viewer found for this format", Toast.LENGTH_SHORT).show()
     }
 }
 
