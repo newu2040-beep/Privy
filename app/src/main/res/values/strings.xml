@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">PRIVY</string>
+    <string name="tagline">Edit it. Clean it. Share it privately.</string>
+    <string name="hero_title">Photos, made private.</string>
+    <string name="hero_subtitle">Edit, protect and export your photos without the clutter.</string>
+    <string name="import_photo">Import Photo</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "PRIVY",
+  "description": "Privacy-first photo editor, metadata cleaner & universal image converter. Edit it. Clean it. Share it privately.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
